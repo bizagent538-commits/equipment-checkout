@@ -97,10 +97,9 @@ const exportToCSV = (data, filename, columns) => {
 export default function App() {
   // Auth state
   const [user, setUser] = useState(null)
-  const [allUsers, setAllUsers] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [authError, setAuthError] = useState('')
-  const [loginMode, setLoginMode] = useState('volunteer') // 'volunteer' or 'chair'
+  const [loginMode, setLoginMode] = useState('member') // 'member' or 'chair'
 
   // Data state
   const [equipment, setEquipment] = useState([])
@@ -126,27 +125,6 @@ export default function App() {
 
   const overdueCheckouts = getOverdueCheckouts(checkouts)
   const maintenanceDue = getMaintenanceDue(equipment)
-
-  // Load all users on startup (for volunteer dropdown)
-  useEffect(() => {
-    fetchAllUsers()
-  }, [])
-
-  const fetchAllUsers = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .order('last_name')
-      
-      if (error) throw error
-      setAllUsers(data || [])
-    } catch (error) {
-      console.error('Error fetching users:', error)
-    } finally {
-      setLoading(false)
-    }
-  }
 
   // Fetch all equipment data
   const fetchAllData = async () => {
@@ -177,18 +155,34 @@ export default function App() {
     setTimeout(() => setNotification(null), 4000)
   }
 
-  // Volunteer login - just select from dropdown
-  const handleVolunteerLogin = (userId) => {
-    const selectedUser = allUsers.find(u => u.id === userId)
-    if (selectedUser) {
-      setUser(selectedUser)
+  // Member login - just enter member number
+  const handleMemberLogin = async (memberNumber) => {
+    setAuthError('')
+    setLoading(true)
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('employee_number', parseInt(memberNumber))
+        .single()
+      
+      if (error || !data) {
+        throw new Error('Member number not found')
+      }
+      
+      setUser(data)
       fetchAllData()
+    } catch (error) {
+      setAuthError(error.message)
+    } finally {
+      setLoading(false)
     }
   }
 
   // Chair/Admin login - email/password via Supabase Auth
   const handleChairLogin = async (email, password) => {
     setAuthError('')
+    setLoading(true)
     try {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) throw error
@@ -203,13 +197,15 @@ export default function App() {
       if (profileError) throw new Error('User profile not found')
       
       if (profile.role !== 'admin' && profile.role !== 'chair') {
-        throw new Error('This login is for chairs/admins only. Use volunteer login.')
+        throw new Error('This login is for chairs/admins only. Use member login.')
       }
       
       setUser(profile)
       fetchAllData()
     } catch (error) {
       setAuthError(error.message)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -370,8 +366,6 @@ export default function App() {
     showNotification('Maintenance schedule exported')
   }
 
-  if (loading) return <div style={styles.loadingContainer}><div style={styles.loadingSpinner}></div><p>Loading...</p></div>
-
   // ============================================
   // LOGIN SCREEN
   // ============================================
@@ -388,10 +382,10 @@ export default function App() {
           {/* Login Mode Tabs */}
           <div style={styles.loginTabs}>
             <button 
-              onClick={() => { setLoginMode('volunteer'); setAuthError('') }}
-              style={loginMode === 'volunteer' ? styles.loginTabActive : styles.loginTab}
+              onClick={() => { setLoginMode('member'); setAuthError('') }}
+              style={loginMode === 'member' ? styles.loginTabActive : styles.loginTab}
             >
-              👤 Volunteer
+              👤 Member
             </button>
             <button 
               onClick={() => { setLoginMode('chair'); setAuthError('') }}
@@ -401,10 +395,10 @@ export default function App() {
             </button>
           </div>
 
-          {loginMode === 'volunteer' ? (
-            <VolunteerLogin users={allUsers} onLogin={handleVolunteerLogin} />
+          {loginMode === 'member' ? (
+            <MemberLogin onLogin={handleMemberLogin} error={authError} loading={loading} />
           ) : (
-            <ChairLogin onLogin={handleChairLogin} error={authError} />
+            <ChairLogin onLogin={handleChairLogin} error={authError} loading={loading} />
           )}
         </div>
       </div>
@@ -487,70 +481,46 @@ export default function App() {
 // LOGIN COMPONENTS
 // ============================================
 
-function VolunteerLogin({ users, onLogin }) {
-  const [selectedUserId, setSelectedUserId] = useState('')
-  const [searchTerm, setSearchTerm] = useState('')
-
-  const filteredUsers = users.filter(u => {
-    const fullName = `${u.first_name} ${u.last_name}`.toLowerCase()
-    const empNum = String(u.employee_number || '')
-    return fullName.includes(searchTerm.toLowerCase()) || empNum.includes(searchTerm)
-  })
+function MemberLogin({ onLogin, error, loading }) {
+  const [memberNumber, setMemberNumber] = useState('')
 
   const handleSubmit = (e) => {
     e.preventDefault()
-    if (selectedUserId) onLogin(selectedUserId)
+    if (memberNumber) onLogin(memberNumber)
   }
 
   return (
     <form onSubmit={handleSubmit} style={styles.loginForm}>
-      <p style={styles.loginHelp}>Select your name to check out or return equipment.</p>
+      <p style={styles.loginHelp}>Enter your member number to check out or return equipment.</p>
       
       <div style={styles.formGroup}>
-        <label style={styles.loginLabel}>Search by name or member #</label>
+        <label style={styles.loginLabel}>Member Number</label>
         <input
-          type="text"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          placeholder="Type to search..."
-          style={styles.loginInput}
+          type="number"
+          value={memberNumber}
+          onChange={(e) => setMemberNumber(e.target.value)}
+          placeholder="Enter your member #"
+          style={styles.loginInputLarge}
+          autoFocus
         />
       </div>
 
-      <div style={styles.formGroup}>
-        <label style={styles.loginLabel}>Select Your Name</label>
-        <select
-          value={selectedUserId}
-          onChange={(e) => setSelectedUserId(e.target.value)}
-          style={styles.loginSelect}
-          size={8}
-        >
-          <option value="">-- Select --</option>
-          {filteredUsers.map(u => (
-            <option key={u.id} value={u.id}>
-              {u.employee_number ? `${u.employee_number} - ` : ''}{u.last_name}, {u.first_name}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <button type="submit" style={styles.loginBtn} disabled={!selectedUserId}>
-        Continue →
+      {error && <p style={styles.errorText}>{error}</p>}
+      
+      <button type="submit" style={styles.loginBtn} disabled={!memberNumber || loading}>
+        {loading ? 'Checking...' : 'Continue →'}
       </button>
     </form>
   )
 }
 
-function ChairLogin({ onLogin, error }) {
+function ChairLogin({ onLogin, error, loading }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [loading, setLoading] = useState(false)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    setLoading(true)
     await onLogin(email, password)
-    setLoading(false)
   }
 
   return (
@@ -772,7 +742,7 @@ const styles = {
   loadingContainer: { minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '16px' },
   loadingSpinner: { width: '40px', height: '40px', border: '3px solid #e2e8f0', borderTop: '3px solid #3b82f6', borderRadius: '50%', animation: 'spin 1s linear infinite' },
   loginContainer: { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%)', padding: '20px' },
-  loginCard: { backgroundColor: '#fff', borderRadius: '16px', padding: '40px', width: '100%', maxWidth: '450px', boxShadow: '0 25px 50px rgba(0,0,0,0.25)' },
+  loginCard: { backgroundColor: '#fff', borderRadius: '16px', padding: '40px', width: '100%', maxWidth: '400px', boxShadow: '0 25px 50px rgba(0,0,0,0.25)' },
   loginHeader: { textAlign: 'center', marginBottom: '24px' },
   logoIcon: { fontSize: '48px', marginBottom: '16px' },
   loginTitle: { margin: 0, fontSize: '24px', fontWeight: '700', color: '#1e293b' },
@@ -784,7 +754,7 @@ const styles = {
   loginHelp: { margin: 0, fontSize: '14px', color: '#64748b', textAlign: 'center' },
   loginLabel: { display: 'block', marginBottom: '6px', fontWeight: '500', color: '#374151', fontSize: '14px' },
   loginInput: { width: '100%', padding: '12px 16px', border: '2px solid #e5e7eb', borderRadius: '8px', fontSize: '16px', boxSizing: 'border-box' },
-  loginSelect: { width: '100%', padding: '8px', border: '2px solid #e5e7eb', borderRadius: '8px', fontSize: '14px', boxSizing: 'border-box' },
+  loginInputLarge: { width: '100%', padding: '16px 20px', border: '3px solid #3b82f6', borderRadius: '10px', fontSize: '24px', boxSizing: 'border-box', textAlign: 'center', fontWeight: '600' },
   loginBtn: { backgroundColor: '#1e3a5f', color: '#fff', border: 'none', padding: '14px', borderRadius: '8px', fontSize: '16px', fontWeight: '600', cursor: 'pointer', marginTop: '8px' },
   errorText: { color: '#dc2626', fontSize: '14px', margin: '0', textAlign: 'center' },
   container: { minHeight: '100vh', backgroundColor: '#f1f5f9' },
@@ -920,4 +890,3 @@ const styles = {
   printModalBtn: { backgroundColor: '#1e3a5f', color: '#fff', border: 'none', padding: '10px 24px', borderRadius: '6px', fontSize: '14px', cursor: 'pointer' },
   closeModalBtn: { backgroundColor: '#f1f5f9', color: '#475569', border: 'none', padding: '10px 24px', borderRadius: '6px', fontSize: '14px', cursor: 'pointer' }
 }
-
