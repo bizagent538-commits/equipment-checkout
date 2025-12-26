@@ -95,13 +95,19 @@ const exportToCSV = (data, filename, columns) => {
 // ============================================
 
 export default function App() {
-  const [session, setSession] = useState(null)
+  // Auth state
   const [user, setUser] = useState(null)
+  const [allUsers, setAllUsers] = useState([])
   const [loading, setLoading] = useState(true)
   const [authError, setAuthError] = useState('')
+  const [loginMode, setLoginMode] = useState('volunteer') // 'volunteer' or 'chair'
+
+  // Data state
   const [equipment, setEquipment] = useState([])
   const [checkouts, setCheckouts] = useState([])
   const [deficiencies, setDeficiencies] = useState([])
+
+  // UI state
   const [activeTab, setActiveTab] = useState('checkout')
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedCategory, setSelectedCategory] = useState('All')
@@ -110,41 +116,39 @@ export default function App() {
   const [qrEquipment, setQrEquipment] = useState(null)
   const [qrDataUrl, setQrDataUrl] = useState('')
   const [notification, setNotification] = useState(null)
+
+  // Form state
   const [checkoutForm, setCheckoutForm] = useState({ useType: 'club', purpose: '', expectedReturn: '' })
   const [returnForm, setReturnForm] = useState({ condition: 'good', deficiencyDesc: '', severity: 'minor' })
   const [newEquipment, setNewEquipment] = useState({ name: '', category: 'Tools', location: '', notes: '' })
+
   const scanInputRef = useRef(null)
 
   const overdueCheckouts = getOverdueCheckouts(checkouts)
   const maintenanceDue = getMaintenanceDue(equipment)
 
+  // Load all users on startup (for volunteer dropdown)
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      if (session?.user) fetchUserProfile(session.user.id)
-      else setLoading(false)
-    })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
-      if (session?.user) fetchUserProfile(session.user.id)
-      else { setUser(null); setLoading(false) }
-    })
-    return () => subscription.unsubscribe()
+    fetchAllUsers()
   }, [])
 
-  const fetchUserProfile = async (userId) => {
+  const fetchAllUsers = async () => {
     try {
-      const { data, error } = await supabase.from('users').select('*').eq('id', userId).single()
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .order('last_name')
+      
       if (error) throw error
-      setUser(data)
-      fetchAllData()
+      setAllUsers(data || [])
     } catch (error) {
-      setAuthError('User profile not found.')
+      console.error('Error fetching users:', error)
     } finally {
       setLoading(false)
     }
   }
 
+  // Fetch all equipment data
   const fetchAllData = async () => {
     await Promise.all([fetchEquipment(), fetchCheckouts(), fetchDeficiencies()])
   }
@@ -173,16 +177,46 @@ export default function App() {
     setTimeout(() => setNotification(null), 4000)
   }
 
-  const handleLogin = async (email, password) => {
-    setAuthError('')
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) setAuthError(error.message)
+  // Volunteer login - just select from dropdown
+  const handleVolunteerLogin = (userId) => {
+    const selectedUser = allUsers.find(u => u.id === userId)
+    if (selectedUser) {
+      setUser(selectedUser)
+      fetchAllData()
+    }
   }
 
+  // Chair/Admin login - email/password via Supabase Auth
+  const handleChairLogin = async (email, password) => {
+    setAuthError('')
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+      if (error) throw error
+      
+      // Get user profile
+      const { data: profile, error: profileError } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', data.user.id)
+        .single()
+      
+      if (profileError) throw new Error('User profile not found')
+      
+      if (profile.role !== 'admin' && profile.role !== 'chair') {
+        throw new Error('This login is for chairs/admins only. Use volunteer login.')
+      }
+      
+      setUser(profile)
+      fetchAllData()
+    } catch (error) {
+      setAuthError(error.message)
+    }
+  }
+
+  // Handle logout
   const handleLogout = async () => {
     await supabase.auth.signOut()
     setUser(null)
-    setSession(null)
   }
 
   const handleScanSearch = (value) => {
@@ -207,6 +241,7 @@ export default function App() {
       setCheckoutForm({ useType: 'club', purpose: '', expectedReturn: '' })
       fetchAllData()
     } catch (error) {
+      console.error('Checkout error:', error)
       showNotification('Error checking out equipment', 'error')
     }
   }
@@ -337,7 +372,10 @@ export default function App() {
 
   if (loading) return <div style={styles.loadingContainer}><div style={styles.loadingSpinner}></div><p>Loading...</p></div>
 
-  if (!session || !user) {
+  // ============================================
+  // LOGIN SCREEN
+  // ============================================
+  if (!user) {
     return (
       <div style={styles.loginContainer}>
         <div style={styles.loginCard}>
@@ -346,7 +384,28 @@ export default function App() {
             <h1 style={styles.loginTitle}>Equipment Checkout</h1>
             <p style={styles.loginSubtitle}>Groton Sportsmen's Club</p>
           </div>
-          <LoginForm onLogin={handleLogin} error={authError} />
+
+          {/* Login Mode Tabs */}
+          <div style={styles.loginTabs}>
+            <button 
+              onClick={() => { setLoginMode('volunteer'); setAuthError('') }}
+              style={loginMode === 'volunteer' ? styles.loginTabActive : styles.loginTab}
+            >
+              👤 Volunteer
+            </button>
+            <button 
+              onClick={() => { setLoginMode('chair'); setAuthError('') }}
+              style={loginMode === 'chair' ? styles.loginTabActive : styles.loginTab}
+            >
+              👔 Chair/Admin
+            </button>
+          </div>
+
+          {loginMode === 'volunteer' ? (
+            <VolunteerLogin users={allUsers} onLogin={handleVolunteerLogin} />
+          ) : (
+            <ChairLogin onLogin={handleChairLogin} error={authError} />
+          )}
         </div>
       </div>
     )
@@ -355,6 +414,9 @@ export default function App() {
   const isAdmin = user.role === 'admin' || user.role === 'chair'
   const alertCount = overdueCheckouts.length + maintenanceDue.length + deficiencies.filter(d => d.status === 'pending').length
 
+  // ============================================
+  // MAIN APP
+  // ============================================
   return (
     <div style={styles.container}>
       <header style={styles.header}>
@@ -422,23 +484,96 @@ export default function App() {
 }
 
 // ============================================
-// SUB-COMPONENTS
+// LOGIN COMPONENTS
 // ============================================
 
-function LoginForm({ onLogin, error }) {
+function VolunteerLogin({ users, onLogin }) {
+  const [selectedUserId, setSelectedUserId] = useState('')
+  const [searchTerm, setSearchTerm] = useState('')
+
+  const filteredUsers = users.filter(u => {
+    const fullName = `${u.first_name} ${u.last_name}`.toLowerCase()
+    const empNum = String(u.employee_number || '')
+    return fullName.includes(searchTerm.toLowerCase()) || empNum.includes(searchTerm)
+  })
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    if (selectedUserId) onLogin(selectedUserId)
+  }
+
+  return (
+    <form onSubmit={handleSubmit} style={styles.loginForm}>
+      <p style={styles.loginHelp}>Select your name to check out or return equipment.</p>
+      
+      <div style={styles.formGroup}>
+        <label style={styles.loginLabel}>Search by name or member #</label>
+        <input
+          type="text"
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          placeholder="Type to search..."
+          style={styles.loginInput}
+        />
+      </div>
+
+      <div style={styles.formGroup}>
+        <label style={styles.loginLabel}>Select Your Name</label>
+        <select
+          value={selectedUserId}
+          onChange={(e) => setSelectedUserId(e.target.value)}
+          style={styles.loginSelect}
+          size={8}
+        >
+          <option value="">-- Select --</option>
+          {filteredUsers.map(u => (
+            <option key={u.id} value={u.id}>
+              {u.employee_number ? `${u.employee_number} - ` : ''}{u.last_name}, {u.first_name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <button type="submit" style={styles.loginBtn} disabled={!selectedUserId}>
+        Continue →
+      </button>
+    </form>
+  )
+}
+
+function ChairLogin({ onLogin, error }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
-  const handleSubmit = async (e) => { e.preventDefault(); setLoading(true); await onLogin(email, password); setLoading(false) }
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setLoading(true)
+    await onLogin(email, password)
+    setLoading(false)
+  }
+
   return (
     <form onSubmit={handleSubmit} style={styles.loginForm}>
-      <div style={styles.formGroup}><label style={styles.loginLabel}>Email</label><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} style={styles.loginInput} placeholder="Enter email" required /></div>
-      <div style={styles.formGroup}><label style={styles.loginLabel}>Password</label><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={styles.loginInput} placeholder="Enter password" required /></div>
+      <p style={styles.loginHelp}>Chair/Admin login for full management access.</p>
+      
+      <div style={styles.formGroup}>
+        <label style={styles.loginLabel}>Email</label>
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} style={styles.loginInput} placeholder="Enter email" required />
+      </div>
+      <div style={styles.formGroup}>
+        <label style={styles.loginLabel}>Password</label>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={styles.loginInput} placeholder="Enter password" required />
+      </div>
       {error && <p style={styles.errorText}>{error}</p>}
       <button type="submit" style={styles.loginBtn} disabled={loading}>{loading ? 'Signing in...' : 'Sign In'}</button>
     </form>
   )
 }
+
+// ============================================
+// TAB COMPONENTS
+// ============================================
 
 function CheckoutTab({ scanInputRef, searchTerm, handleScanSearch, selectedCategory, setSelectedCategory, filteredEquipment, selectedEquipment, setSelectedEquipment, checkoutForm, setCheckoutForm, handleCheckout, returnForm, setReturnForm, handleReturn, checkouts }) {
   return (
@@ -637,14 +772,19 @@ const styles = {
   loadingContainer: { minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '16px' },
   loadingSpinner: { width: '40px', height: '40px', border: '3px solid #e2e8f0', borderTop: '3px solid #3b82f6', borderRadius: '50%', animation: 'spin 1s linear infinite' },
   loginContainer: { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%)', padding: '20px' },
-  loginCard: { backgroundColor: '#fff', borderRadius: '16px', padding: '40px', width: '100%', maxWidth: '400px', boxShadow: '0 25px 50px rgba(0,0,0,0.25)' },
-  loginHeader: { textAlign: 'center', marginBottom: '32px' },
+  loginCard: { backgroundColor: '#fff', borderRadius: '16px', padding: '40px', width: '100%', maxWidth: '450px', boxShadow: '0 25px 50px rgba(0,0,0,0.25)' },
+  loginHeader: { textAlign: 'center', marginBottom: '24px' },
   logoIcon: { fontSize: '48px', marginBottom: '16px' },
   loginTitle: { margin: 0, fontSize: '24px', fontWeight: '700', color: '#1e293b' },
   loginSubtitle: { margin: '8px 0 0', color: '#64748b', fontSize: '14px' },
+  loginTabs: { display: 'flex', gap: '8px', marginBottom: '24px' },
+  loginTab: { flex: 1, padding: '12px', border: '2px solid #e2e8f0', borderRadius: '8px', backgroundColor: '#fff', cursor: 'pointer', fontSize: '14px', fontWeight: '500', color: '#64748b' },
+  loginTabActive: { flex: 1, padding: '12px', border: '2px solid #1e3a5f', borderRadius: '8px', backgroundColor: '#1e3a5f', cursor: 'pointer', fontSize: '14px', fontWeight: '500', color: '#fff' },
   loginForm: { display: 'flex', flexDirection: 'column', gap: '16px' },
+  loginHelp: { margin: 0, fontSize: '14px', color: '#64748b', textAlign: 'center' },
   loginLabel: { display: 'block', marginBottom: '6px', fontWeight: '500', color: '#374151', fontSize: '14px' },
   loginInput: { width: '100%', padding: '12px 16px', border: '2px solid #e5e7eb', borderRadius: '8px', fontSize: '16px', boxSizing: 'border-box' },
+  loginSelect: { width: '100%', padding: '8px', border: '2px solid #e5e7eb', borderRadius: '8px', fontSize: '14px', boxSizing: 'border-box' },
   loginBtn: { backgroundColor: '#1e3a5f', color: '#fff', border: 'none', padding: '14px', borderRadius: '8px', fontSize: '16px', fontWeight: '600', cursor: 'pointer', marginTop: '8px' },
   errorText: { color: '#dc2626', fontSize: '14px', margin: '0', textAlign: 'center' },
   container: { minHeight: '100vh', backgroundColor: '#f1f5f9' },
@@ -780,3 +920,4 @@ const styles = {
   printModalBtn: { backgroundColor: '#1e3a5f', color: '#fff', border: 'none', padding: '10px 24px', borderRadius: '6px', fontSize: '14px', cursor: 'pointer' },
   closeModalBtn: { backgroundColor: '#f1f5f9', color: '#475569', border: 'none', padding: '10px 24px', borderRadius: '6px', fontSize: '14px', cursor: 'pointer' }
 }
+
